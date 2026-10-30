@@ -49,6 +49,12 @@ PATTERNS = {
                   None),
 }
 
+FALLBACK_QUERY = {
+    "fee": "tuition fee international students",
+    "deadline": "application deadline",
+    "documents": "admission requirements documents",
+}
+
 
 def is_directory(url):
     d = urlparse(url).netloc.lower()
@@ -58,6 +64,8 @@ def is_directory(url):
 def fetch(url):
     try:
         r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code >= 400:
+            return None
         if "text/html" not in r.headers.get("content-type", ""):
             return None
         return BeautifulSoup(r.text, "html.parser")
@@ -90,28 +98,60 @@ def related_links(soup, base):
     return found[:2]
 
 
+def add_from_text(text, src, data, seen):
+    for chunk in re.split(r"(?<=[.!?])\s+|\s{2,}", text or ""):
+        chunk = chunk.strip()[:300]
+        if len(chunk) < 15 or chunk in seen:
+            continue
+        for key, (main, extra) in PATTERNS.items():
+            if main.search(chunk) and (extra is None or extra.search(chunk)):
+                seen.add(chunk)
+                data[key].append((chunk, src))
+
+
 def analyse(result, year, intake):
     url = result.get("href", "")
+    title = result.get("title", "")
+    domain = urlparse(url).netloc.replace("www.", "")
     data = {k: [] for k in PATTERNS}
-    soup = fetch(url)
-    if soup is None:
-        return result, data, False
-    pages = [(url, soup)]
-    for link in related_links(BeautifulSoup(str(soup), "html.parser"), url):
-        s = fetch(link)
-        if s is not None:
-            pages.append((link, s))
     seen = set()
-    for src, s in pages:
-        for line in page_lines(s):
-            for key, (main, extra) in PATTERNS.items():
-                if main.search(line) and (extra is None or extra.search(line)) and line not in seen:
-                    seen.add(line)
-                    data[key].append((line, src))
-    for key in data:  # prefer lines mentioning the chosen year/intake
-        data[key].sort(key=lambda x: (year not in x[0], intake.lower() not in x[0].lower()))
+
+    # 1) university page + related admission/fee pages
+    soup = fetch(url)
+    ok = soup is not None
+    if ok:
+        pages = [(url, soup)]
+        for link in related_links(BeautifulSoup(str(soup), "html.parser"), url):
+            s = fetch(link)
+            if s is not None:
+                pages.append((link, s))
+        for src, s in pages:
+            for line in page_lines(s):
+                add_from_text(line, src, data, seen)
+
+    # 2) the search snippet itself
+    add_from_text(result.get("body", ""), url, data, seen)
+
+    # 3) targeted search on the same site for missing fields
+    for key, kw in FALLBACK_QUERY.items():
+        if data[key]:
+            continue
+        try:
+            with DDGS(timeout=20) as d:
+                hits = list(d.text(f"site:{domain} {title} {kw} {year}",
+                                   max_results=4, backend="auto") or [])
+            for h in hits:
+                add_from_text(h.get("body", ""), h.get("href", url), data, seen)
+        except Exception:
+            pass
+
+    for key in data:
+        data[key].sort(key=lambda x: (year not in x[0],
+                                      intake.lower() not in x[0].lower()))
         data[key] = data[key][:4]
-    return result, data, True
+
+    has_any = any(data.values())
+    return result, data, (ok or has_any)
 
 
 def search(query, n):
@@ -183,6 +223,6 @@ if "res" in st.session_state:
                             st.write("Not found on the page. Check the official website.")
                 if url:
                     st.link_button("🌐 Open Source Website", url)
-                    
+
 st.divider()
-st.caption("Information is extracted directly from university pages. Always confirm on the official site before applying.")
+st.caption("Information is extracted directly from university pages. Always confirm on the official site before applying.") 
