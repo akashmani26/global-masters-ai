@@ -1,4 +1,5 @@
 import re
+import time
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -109,6 +110,29 @@ def add_from_text(text, src, data, seen):
                 data[key].append((chunk, src))
 
 
+def ddg_text(query, n):
+    last = None
+    for backend in ["auto", "bing", "brave", "yahoo", "mojeek"]:
+        for _ in range(2):
+            try:
+                with DDGS(timeout=20) as d:
+                    items = list(d.text(query, max_results=n, backend=backend) or [])
+                if items:
+                    return items
+            except Exception as e:
+                last = e
+                time.sleep(1.5)
+    if last:
+        raise last
+    return []
+
+
+def search(query, n):
+    items = ddg_text(query, n * 3)
+    items = [i for i in items if not is_directory(i.get("href", ""))]
+    return items[:n]
+
+
 def analyse(result, year, intake):
     url = result.get("href", "")
     title = result.get("title", "")
@@ -137,9 +161,7 @@ def analyse(result, year, intake):
         if data[key]:
             continue
         try:
-            with DDGS(timeout=20) as d:
-                hits = list(d.text(f"site:{domain} {title} {kw} {year}",
-                                   max_results=4, backend="auto") or [])
+            hits = ddg_text(f"site:{domain} {title} {kw} {year}", 4)
             for h in hits:
                 add_from_text(h.get("body", ""), h.get("href", url), data, seen)
         except Exception:
@@ -152,13 +174,6 @@ def analyse(result, year, intake):
 
     has_any = any(data.values())
     return result, data, (ok or has_any)
-
-
-def search(query, n):
-    with DDGS(timeout=25) as d:
-        items = list(d.text(query, max_results=n * 3, backend="auto") or [])
-    items = [i for i in items if not is_directory(i.get("href", ""))]
-    return items[:n]
 
 
 if st.button("🔍 Find Universities", type="primary"):
@@ -177,12 +192,13 @@ if st.button("🔍 Find Universities", type="primary"):
                  f"{country.strip() or 'Europe'}")
             try:
                 res = search(q, max_results)
-                with ThreadPoolExecutor(max_workers=5) as ex:
+                with ThreadPoolExecutor(max_workers=2) as ex:
                     analysed = list(ex.map(lambda r: analyse(r, year, intake), res))
                 out[intake] = {"items": analysed, "error": None}
             except Exception as e:
                 out[intake] = {"items": [], "error": str(e)}
             bar.progress((i + 1) / len(intakes))
+            time.sleep(2)
         st.session_state.update(res=out, year=year, text=search_text)
         status.success("Done!")
 
@@ -225,4 +241,4 @@ if "res" in st.session_state:
                     st.link_button("🌐 Open Source Website", url)
 
 st.divider()
-st.caption("Information is extracted directly from university pages. Always confirm on the official site before applying.") 
+st.caption("Information is extracted directly from university pages. Always confirm on the official site before applying.")
