@@ -1,11 +1,13 @@
 
+
 import streamlit as st
 from ddgs import DDGS
 from datetime import datetime
+from urllib.parse import urlparse
 
-# --------------------------------
-# PAGE SETTINGS
-# --------------------------------
+# ==========================================
+# PAGE CONFIGURATION
+# ==========================================
 
 st.set_page_config(
     page_title="Global Masters AI",
@@ -14,18 +16,18 @@ st.set_page_config(
 )
 
 st.title("🎓 Global Master's University Finder")
-st.caption("Worldwide Master's University Search | Europe Priority")
+st.caption("Worldwide University Search | Europe Priority")
 
 st.write(
-    "Find Master's programs around the world. "
-    "Compare admission intakes, tuition fees, documents and deadlines."
+    "Find Master's programs worldwide and explore admission "
+    "intakes, tuition fees, documents and application deadlines."
 )
 
-# --------------------------------
-# SEARCH PREFERENCES
-# --------------------------------
+# ==========================================
+# SIDEBAR
+# ==========================================
 
-st.sidebar.header("Search Preferences")
+st.sidebar.header("🔎 Search Preferences")
 
 course = st.sidebar.text_input(
     "Master's Course",
@@ -33,7 +35,7 @@ course = st.sidebar.text_input(
 )
 
 country = st.sidebar.text_input(
-    "Country (Leave blank for worldwide search)",
+    "Country (Leave blank for worldwide)",
     value=""
 )
 
@@ -43,38 +45,40 @@ year = st.sidebar.selectbox(
 )
 
 intakes = st.sidebar.multiselect(
-    "Select Admission Intake",
+    "Select Intake",
     ["February", "March", "April"],
     default=["February", "March", "April"]
 )
 
-st.info(
-    "🌍 Search universities worldwide, with Europe as a priority. "
-    "Always verify admission information using official university websites."
+st.sidebar.caption(
+    "Search is free. No API key or payment required."
 )
 
-# --------------------------------
+st.info(
+    "🌍 Search universities worldwide, with Europe as a priority. "
+    "Always verify admission details on the university's official website."
+)
+
+# ==========================================
 # SEARCH FUNCTION
-# --------------------------------
+# ==========================================
 
 def search_universities(query):
 
     with DDGS(timeout=20) as ddgs:
 
-        results = list(
-            ddgs.text(
-                query,
-                max_results=5,
-                backend="bing,google"
-            )
+        results = ddgs.text(
+            query,
+            max_results=6,
+            backend="auto"
         )
 
-    return results
+    return list(results or [])
 
 
-# --------------------------------
-# FIND UNIVERSITIES BUTTON
-# --------------------------------
+# ==========================================
+# SEARCH BUTTON
+# ==========================================
 
 if st.button("🔍 Find Universities", type="primary"):
 
@@ -94,17 +98,26 @@ if st.button("🔍 Find Universities", type="primary"):
         for index, intake in enumerate(intakes):
 
             status.write(
-                f"Searching {intake} {year} admission information..."
-            )
-
-            query = (
-                f"{course} Master's admission {intake} {year} "
-                f"Europe universities official admission page "
-                f"tuition fees application deadline required documents"
+                f"Searching {intake} {year} intake..."
             )
 
             if country.strip():
-                query += f" {country}"
+
+                query = (
+                    f"{course} Master's {intake} {year} "
+                    f"admission universities in {country} "
+                    f"official university admissions tuition fees "
+                    f"application deadline"
+                )
+
+            else:
+
+                query = (
+                    f"{course} Master's {intake} {year} "
+                    f"admission universities Europe "
+                    f"international students official admissions "
+                    f"tuition fees application deadline"
+                )
 
             try:
 
@@ -131,9 +144,9 @@ if st.button("🔍 Find Universities", type="primary"):
         status.success("Search completed!")
 
 
-# --------------------------------
+# ==========================================
 # DISPLAY RESULTS
-# --------------------------------
+# ==========================================
 
 if "university_results" in st.session_state:
 
@@ -158,12 +171,12 @@ if "university_results" in st.session_state:
         if data["error"]:
 
             st.warning(
-                "Search temporarily failed for this intake. "
+                "Search could not be completed for this intake. "
                 "Please try again later."
             )
 
             with st.expander("Technical details"):
-                st.write(data["error"])
+                st.code(data["error"])
 
             continue
 
@@ -171,7 +184,7 @@ if "university_results" in st.session_state:
 
         if not results:
 
-            st.info("No search results found for this intake.")
+            st.info("No results found for this intake.")
             continue
 
         seen_urls = set()
@@ -193,15 +206,21 @@ if "university_results" in st.session_state:
             if url:
                 seen_urls.add(url)
 
+            domain = (
+                urlparse(url).netloc
+                if url
+                else "Not available"
+            )
+
             with st.container(border=True):
 
                 st.subheader("🎓 " + title)
 
-                st.write("**Course:** " + searched_course)
+                st.write("**Course:**", searched_course)
 
                 st.write(
-                    "**Admission Intake:** "
-                    + intake + " " + searched_year
+                    "**Selected Intake:**",
+                    intake + " " + searched_year
                 )
 
                 st.write("**Admission Information:**")
@@ -209,38 +228,51 @@ if "university_results" in st.session_state:
                 st.write(
                     description
                     if description
-                    else "Information not available in search result."
+                    else "No description available."
                 )
 
-                st.write("**Required Documents:**")
+                st.write("**Source Website:**", domain)
+
+                st.divider()
+
+                st.write("### 📄 Required Documents")
+
                 st.write(
-                    "Not confirmed. Check the official university admission page."
+                    "Not verified. Check the university's "
+                    "official admission requirements."
                 )
 
-                st.write("**Tuition Fee:**")
+                st.write("### 💰 Tuition Fee")
+
                 st.write(
-                    "Not confirmed. Check the official university fee page."
+                    "Not verified. Check the official university "
+                    "fee schedule for international students."
                 )
 
-                st.write("**Application Deadline:**")
+                st.write("### 📅 Application Deadline")
+
                 st.write(
-                    "Not confirmed. Check the official university deadline."
+                    "Not verified. Check the official application "
+                    "deadline for the selected intake."
                 )
 
                 st.warning(
-                    "Search results do not confirm that this university "
-                    "offers the selected intake. Verify directly with the university."
+                    "Important: A search result does not confirm "
+                    "that the university offers this intake. "
+                    "Verify the course, intake, eligibility, fees "
+                    "and deadline directly with the university."
                 )
 
                 if url:
+
                     st.link_button(
-                        "🌐 Visit Source Website",
+                        "🌐 Open University / Source Website",
                         url
                     )
 
-# --------------------------------
+# ==========================================
 # FOOTER
-# --------------------------------
+# ==========================================
 
 st.divider()
 
