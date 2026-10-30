@@ -1,3 +1,5 @@
+ANTHROPIC_API_KEY = "sk-ant-your-key-here"
+
 streamlit
 ddgs
 requests
