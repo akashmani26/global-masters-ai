@@ -1,113 +1,54 @@
+import json
 import re
 import time
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from bs4 import BeautifulSoup
 from ddgs import DDGS
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 
-st.set_page_config(page_title="Global Masters AI", page_icon="🎓", layout="wide")
-st.title("🎓 Global Master's University Finder")
-st.caption("Worldwide Master's Search | Europe Priority")
+st.set_page_config(page_title="Global Masters AI", page_icon="🎓", layout="centered")
+st.title("🎓 Masters Voice Assistant")
+st.caption("Ask about universities, courses, fees, deadlines, admission and IELTS requirements.")
 
-search_text = st.text_input(
-    "Search course or university name",
-    placeholder="Example: Mechanical Engineering or TU Munich",
-)
-col1, col2 = st.columns(2)
-with col1:
-    country = st.text_input("Country (blank = Europe)", placeholder="Germany, Poland...")
-with col2:
-    year = st.selectbox("Admission year", ["2027", "2028"])
-intakes = st.multiselect(
-    "Select intake", ["February", "March", "April"],
-    default=["February", "March", "April"],
-)
-max_results = st.slider("Results per intake", 3, 10, 5)
+API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
+MODEL = st.secrets.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
 
+if not API_KEY:
+    st.error("Add ANTHROPIC_API_KEY in Manage app → Settings → Secrets.")
+    st.stop()
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 DIRECTORY_DOMAINS = [
     "mastersportal.com", "studyineurope.eu", "bachelorsportal.com",
     "educations.com", "findamasters.com", "hotcoursesabroad.com",
     "studyportals.com", "shiksha.com", "collegedunia.com", "youtube.com",
     "wikipedia.org", "reddit.com", "quora.com", "facebook.com", "linkedin.com",
 ]
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                         "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
-LINK_WORDS = re.compile(r"admission|requirement|tuition|fee|deadline|apply|application|intake", re.I)
-MONTHS = r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+KEY_LINES = re.compile(
+    r"(deadline|apply|application|tuition|fee|€|EUR|IELTS|TOEFL|language|requirement|"
+    r"admission|semester|ECTS|credits|intake|duration|transcript|motivation|"
+    r"recommendation|GPA|CGPA|eligib)", re.I)
 
-PATTERNS = {
-    "fee": (re.compile(r"(tuition|semester fee|fees?\b|€|EUR|euro|no tuition|free of charge)", re.I),
-            re.compile(r"(\d|free of charge|no tuition)", re.I)),
-    "deadline": (re.compile(r"(deadline|application period|apply by|closing date|applications? (open|close)|"
-                            r"submit.*application|application.*until)", re.I),
-                 re.compile(MONTHS + r"|\d{1,2}[./]\d{1,2}[./]\d{2,4}|20\d\d", re.I)),
-    "documents": (re.compile(r"(transcript|passport|IELTS|TOEFL|motivation|letter of recommendation|"
-                             r"curriculum vitae|\bCV\b|degree certificate|bachelor.{0,20}certificate|"
-                             r"language (proof|certificate)|required documents|GRE|APS|CGPA|GPA)", re.I),
-                  None),
-}
-
-FALLBACK_QUERY = {
-    "fee": "tuition fee international students",
-    "deadline": "application deadline",
-    "documents": "admission requirements documents",
-}
+SYSTEM = """You are a friendly voice assistant that helps students find Master's programmes.
+Today's date is {today}.
+Answer ONLY from the numbered sources provided with the question.
+Your reply is spoken aloud, so: 1 to 4 short sentences, plain text, no markdown, no lists,
+no URLs, no source numbers. Name the university or website when you give a figure or date.
+If the sources do not contain the answer, or they conflict, say so plainly and tell the user
+to check the official university page. Never guess fees, deadlines, or IELTS scores.
+If the question is not about universities or studying abroad, politely steer back.
+Always reply in English."""
 
 
+# ---------- helpers ----------
 def is_directory(url):
     d = urlparse(url).netloc.lower()
     return any(s in d for s in DIRECTORY_DOMAINS)
-
-
-def fetch(url):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        if r.status_code >= 400:
-            return None
-        if "text/html" not in r.headers.get("content-type", ""):
-            return None
-        return BeautifulSoup(r.text, "html.parser")
-    except Exception:
-        return None
-
-
-def page_lines(soup):
-    for t in soup(["script", "style", "nav", "footer", "header", "noscript"]):
-        t.decompose()
-    text = soup.get_text("\n")
-    lines = []
-    for raw in text.split("\n"):
-        raw = re.sub(r"\s+", " ", raw).strip()
-        for s in re.split(r"(?<=[.!?])\s+", raw):
-            if 20 <= len(s) <= 300:
-                lines.append(s)
-    return lines
-
-
-def related_links(soup, base):
-    host = urlparse(base).netloc
-    found = []
-    for a in soup.find_all("a", href=True):
-        full = urljoin(base, a["href"]).split("#")[0]
-        if urlparse(full).netloc != host or full == base or full.lower().endswith(".pdf"):
-            continue
-        if LINK_WORDS.search(a.get_text(" ") + " " + a["href"]) and full not in found:
-            found.append(full)
-    return found[:2]
-
-
-def add_from_text(text, src, data, seen):
-    for chunk in re.split(r"(?<=[.!?])\s+|\s{2,}", text or ""):
-        chunk = chunk.strip()[:300]
-        if len(chunk) < 15 or chunk in seen:
-            continue
-        for key, (main, extra) in PATTERNS.items():
-            if main.search(chunk) and (extra is None or extra.search(chunk)):
-                seen.add(chunk)
-                data[key].append((chunk, src))
 
 
 def ddg_text(query, n):
@@ -121,124 +62,254 @@ def ddg_text(query, n):
                     return items
             except Exception as e:
                 last = e
-                time.sleep(1.5)
+                time.sleep(1)
     if last:
         raise last
     return []
 
 
-def search(query, n):
-    items = ddg_text(query, n * 3)
-    items = [i for i in items if not is_directory(i.get("href", ""))]
-    return items[:n]
+def read_page(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        if r.status_code >= 400 or "text/html" not in r.headers.get("content-type", ""):
+            return ""
+        soup = BeautifulSoup(r.text, "html.parser")
+        for t in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+            t.decompose()
+        lines = []
+        for raw in soup.get_text("\n").split("\n"):
+            raw = re.sub(r"\s+", " ", raw).strip()
+            if 20 <= len(raw) <= 400:
+                lines.append(raw)
+        picked, total = [], 0
+        for line in lines:
+            if KEY_LINES.search(line):
+                picked.append(line)
+                total += len(line)
+                if total > 2500:
+                    break
+        return "\n".join(picked) if picked else "\n".join(lines[:15])[:1500]
+    except Exception:
+        return ""
 
 
-def analyse(result, year, intake):
-    url = result.get("href", "")
-    title = result.get("title", "")
-    domain = urlparse(url).netloc.replace("www.", "")
-    data = {k: [] for k in PATTERNS}
-    seen = set()
+def claude(system, messages, max_tokens=400):
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": MODEL, "max_tokens": max_tokens,
+              "system": system, "messages": messages},
+        timeout=60,
+    )
+    r.raise_for_status()
+    blocks = r.json().get("content", [])
+    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
 
-    # 1) university page + related admission/fee pages
-    soup = fetch(url)
-    ok = soup is not None
-    if ok:
-        pages = [(url, soup)]
-        for link in related_links(BeautifulSoup(str(soup), "html.parser"), url):
-            s = fetch(link)
-            if s is not None:
-                pages.append((link, s))
-        for src, s in pages:
-            for line in page_lines(s):
-                add_from_text(line, src, data, seen)
 
-    # 2) the search snippet itself
-    add_from_text(result.get("body", ""), url, data, seen)
+def standalone_query(question, history):
+    if not history:
+        return question
+    convo = "\n".join(f"{m['role']}: {m['content']}" for m in history[-6:])
+    try:
+        q = claude(
+            "Rewrite the user's latest message into one standalone web search query "
+            "(max 15 words) using the conversation for context. Output only the query.",
+            [{"role": "user", "content": f"Conversation:\n{convo}\n\nLatest message: {question}"}],
+            max_tokens=50,
+        )
+        return q.strip().strip('"') or question
+    except Exception:
+        return question
 
-    # 3) targeted search on the same site for missing fields
-    for key, kw in FALLBACK_QUERY.items():
-        if data[key]:
-            continue
+
+def gather(query):
+    hits = ddg_text(query + " Master's international students", 8)
+    hits = [h for h in hits if not is_directory(h.get("href", ""))][:5]
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        texts = list(ex.map(lambda h: read_page(h.get("href", "")), hits[:4]))
+    texts += [""] * (len(hits) - len(texts))
+    return [{"title": h.get("title", ""), "url": h.get("href", ""),
+             "snippet": h.get("body", ""), "text": t} for h, t in zip(hits, texts)]
+
+
+def build_context(sources):
+    parts = []
+    for i, s in enumerate(sources, 1):
+        parts.append(f"[{i}] {s['title']}\nURL: {s['url']}\nSnippet: {s['snippet']}\n"
+                     f"Page extracts:\n{s['text']}")
+    return "\n\n".join(parts)[:14000]
+
+
+def answer_question(question, history):
+    query = standalone_query(question, history)
+    try:
+        sources = gather(query)
+    except Exception:
+        sources = []
+    ctx = build_context(sources) if sources else "No sources could be retrieved."
+    msgs = [{"role": m["role"], "content": m["content"]} for m in history[-6:]]
+    msgs.append({"role": "user",
+                 "content": f"Sources:\n{ctx}\n\nQuestion: {question}"})
+    text = claude(SYSTEM.format(today=datetime.now().strftime("%d %B %Y")), msgs)
+    text = re.sub(r"[*_#`]", "", text)
+    return text, sources
+
+
+# ---------- state ----------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+    st.session_state.turn = 0
+
+with st.sidebar:
+    if st.button("🗑 New conversation"):
+        st.session_state.messages = []
+        st.session_state.turn += 1
+        st.rerun()
+
+voice_slot = st.empty()
+
+# ---------- chat ----------
+prompt = st.chat_input("Speak with the mic above, or type here...")
+if prompt:
+    history = [{"role": m["role"], "content": m["content"]}
+               for m in st.session_state.messages]
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.spinner("Searching university pages..."):
         try:
-            hits = ddg_text(f"site:{domain} {title} {kw} {year}", 4)
-            for h in hits:
-                add_from_text(h.get("body", ""), h.get("href", url), data, seen)
-        except Exception:
-            pass
+            reply, sources = answer_question(prompt, history)
+        except Exception as e:
+            reply, sources = ("Sorry, I could not get that answer right now. "
+                              "Please try again."), []
+            st.session_state["last_error"] = str(e)
+    st.session_state.messages.append(
+        {"role": "assistant", "content": reply, "sources": sources})
+    st.session_state.turn += 1
+    st.session_state["speak"] = {"id": st.session_state.turn, "text": reply}
 
-    for key in data:
-        data[key].sort(key=lambda x: (year not in x[0],
-                                      intake.lower() not in x[0].lower()))
-        data[key] = data[key][:4]
+if not st.session_state.messages:
+    st.info("Tap **Start conversation** and ask, for example: "
+            "\"What is the IELTS requirement for Mechatronics at TU Chemnitz?\"")
 
-    has_any = any(data.values())
-    return result, data, (ok or has_any)
+for m in st.session_state.messages:
+    with st.chat_message(m["role"]):
+        st.write(m["content"])
+        if m.get("sources"):
+            with st.expander("Sources"):
+                for s in m["sources"]:
+                    st.markdown(f"- [{s['title'] or s['url']}]({s['url']})")
 
+if st.session_state.get("last_error"):
+    with st.expander("Technical details"):
+        st.code(st.session_state["last_error"])
 
-if st.button("🔍 Find Universities", type="primary"):
-    if not search_text.strip():
-        st.warning("Please enter a course or university name.")
-    elif not intakes:
-        st.warning("Please select at least one intake.")
-    else:
-        out = {}
-        bar = st.progress(0)
-        status = st.empty()
-        for i, intake in enumerate(intakes):
-            status.write(f"Reading official pages for {intake} {year}...")
-            q = (f"{search_text} Master's {intake} {year} intake admission requirements "
-                 f"tuition fee deadline international students "
-                 f"{country.strip() or 'Europe'}")
-            try:
-                res = search(q, max_results)
-                with ThreadPoolExecutor(max_workers=2) as ex:
-                    analysed = list(ex.map(lambda r: analyse(r, year, intake), res))
-                out[intake] = {"items": analysed, "error": None}
-            except Exception as e:
-                out[intake] = {"items": [], "error": str(e)}
-            bar.progress((i + 1) / len(intakes))
-            time.sleep(2)
-        st.session_state.update(res=out, year=year, text=search_text)
-        status.success("Done!")
+# ---------- voice widget ----------
+VOICE_HTML = """
+<div style="font-family:sans-serif;padding:10px;border:1px solid #444;border-radius:12px;">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;">
+    <button id="start" style="padding:12px 16px;border-radius:10px;border:0;background:#ff4b4b;color:#fff;font-size:16px;">🎤 Start conversation</button>
+    <button id="end" style="padding:12px 16px;border-radius:10px;border:0;background:#555;color:#fff;font-size:16px;">⏹ End</button>
+  </div>
+  <div id="live" style="margin-top:10px;padding:10px;border-radius:8px;background:#262730;color:#fff;min-height:24px;">Tap Start conversation, then speak.</div>
+</div>
+<script>
+const P = window.parent;
+const SPEAK = __SPEAK__;
+const SID = "__SID__";
+const SR = P.SpeechRecognition || P.webkitSpeechRecognition;
+const live = document.getElementById("live");
 
-if "res" in st.session_state:
-    st.divider()
-    st.header("🎓 Results")
-    st.caption("Search date: " + datetime.now().strftime("%d-%m-%Y %H:%M"))
-    labels = {"fee": "💰 Tuition / Fees", "deadline": "📅 Deadline",
-              "documents": "📄 Required Documents"}
+function sendToChat(text) {
+  const ta = P.document.querySelector('textarea[data-testid="stChatInputTextArea"]')
+          || P.document.querySelector('[data-testid="stChatInput"] textarea');
+  if (!ta) { live.textContent = "Chat box not found. Please type your question."; return false; }
+  const setter = Object.getOwnPropertyDescriptor(P.HTMLTextAreaElement.prototype, "value").set;
+  setter.call(ta, text);
+  ta.dispatchEvent(new P.Event("input", {bubbles: true}));
+  setTimeout(() => {
+    const b = P.document.querySelector('[data-testid="stChatInputSubmitButton"]')
+           || P.document.querySelector('[data-testid="stChatInput"] button');
+    if (b) b.click();
+  }, 300);
+  return true;
+}
 
-    for intake, block in st.session_state["res"].items():
-        st.subheader(f"📅 {intake} {st.session_state['year']}")
-        if block["error"]:
-            st.error("Search failed. Try again later.")
-            with st.expander("Technical details"):
-                st.code(block["error"])
-            continue
-        if not block["items"]:
-            st.info("No results. Try another course or country.")
-            continue
+function listen() {
+  if (!SR) { live.textContent = "Voice is not supported here. Use Chrome."; return; }
+  if (P.speechSynthesis.speaking) return;
+  try { if (P.__rec) P.__rec.abort(); } catch (e) {}
+  const rec = new SR();
+  P.__rec = rec;
+  rec.lang = "en-IN";
+  rec.interimResults = true;
+  rec.continuous = false;
+  let finalText = "";
+  rec.onstart = () => { live.textContent = "🎙 Listening..."; };
+  rec.onresult = (e) => {
+    let interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalText += t; else interim += t;
+    }
+    live.textContent = "🗣 " + (finalText + interim);
+  };
+  rec.onerror = (e) => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+      P.__convo = false;
+      live.textContent = "Microphone blocked. Allow it in Chrome site settings.";
+    } else if (e.error !== "no-speech" && e.error !== "aborted") {
+      live.textContent = "Voice error: " + e.error;
+    }
+  };
+  rec.onend = () => {
+    if (P.__rec !== rec) return;
+    const t = finalText.trim();
+    if (t) {
+      live.textContent = "⏳ Looking it up: " + t;
+      sendToChat(t);
+    } else if (P.__convo) {
+      setTimeout(listen, 400);
+    }
+  };
+  rec.start();
+}
 
-        for result, data, ok in block["items"]:
-            url = result.get("href", "")
-            domain = urlparse(url).netloc.replace("www.", "")
-            with st.container(border=True):
-                st.markdown("### 🎓 " + result.get("title", "Result"))
-                st.write("**Website:**", domain)
-                st.write(result.get("body", ""))
-                if not ok:
-                    st.warning("Page could not be read automatically. Open the website.")
-                else:
-                    for key, label in labels.items():
-                        st.markdown(f"#### {label}")
-                        if data[key]:
-                            for line, src in data[key]:
-                                st.markdown(f"- {line}  \n  [source]({src})")
-                        else:
-                            st.write("Not found on the page. Check the official website.")
-                if url:
-                    st.link_button("🌐 Open Source Website", url)
+function speak(text) {
+  P.speechSynthesis.cancel();
+  const u = new P.SpeechSynthesisUtterance(text);
+  u.lang = "en-IN";
+  u.rate = 1.0;
+  u.onstart = () => { live.textContent = "🔊 " + text; };
+  u.onend = () => { if (P.__convo) setTimeout(listen, 300); };
+  P.speechSynthesis.speak(u);
+}
 
-st.divider()
-st.caption("Information is extracted directly from university pages. Always confirm on the official site before applying.")
+document.getElementById("start").onclick = () => {
+  P.__convo = true;
+  P.speechSynthesis.cancel();
+  listen();
+};
+document.getElementById("end").onclick = () => {
+  P.__convo = false;
+  try { if (P.__rec) P.__rec.abort(); } catch (e) {}
+  P.speechSynthesis.cancel();
+  live.textContent = "Conversation ended. Tap Start to talk again.";
+};
+
+if (SPEAK && P.__spokenId !== SID) {
+  P.__spokenId = SID;
+  speak(SPEAK);
+} else if (P.__convo && !P.speechSynthesis.speaking) {
+  listen();
+}
+</script>
+"""
+
+sp = st.session_state.get("speak", {"id": 0, "text": ""})
+html = (VOICE_HTML
+        .replace("__SPEAK__", json.dumps(sp["text"]).replace("</", "<\\/"))
+        .replace("__SID__", str(sp["id"])))
+with voice_slot:
+    components.html(html, height=170)
+
+st.caption("Answers come from pages found just now. Always confirm deadlines and fees on the official university website.")
