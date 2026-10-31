@@ -94,8 +94,7 @@ def read_page(url):
         return ""
 
 
-def claude(system, messages, max_tokens=400):
-    # Calls Google Gemini (function name kept so the rest of the code is unchanged)
+def _gemini(system, messages, max_tokens=1500, tools=None, timeout=30):
     contents = [
         {"role": "model" if m["role"] == "assistant" else "user",
          "parts": [{"text": m["content"]}]}
@@ -106,6 +105,8 @@ def claude(system, messages, max_tokens=400):
         "contents": contents,
         "generationConfig": {"maxOutputTokens": max_tokens},
     }
+    if tools:
+        body["tools"] = tools
     models = [MODEL] + [m.strip() for m in FALLBACK_MODELS.split(",") if m.strip()]
     last_err = "unknown error"
     for model in models:
@@ -115,7 +116,7 @@ def claude(system, messages, max_tokens=400):
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                     headers={"x-goog-api-key": API_KEY, "content-type": "application/json"},
                     json=body,
-                    timeout=30,
+                    timeout=timeout,
                 )
             except requests.exceptions.RequestException as e:
                 last_err = f"{model}: {e}"
@@ -124,15 +125,26 @@ def claude(system, messages, max_tokens=400):
             if r.status_code == 200:
                 cands = r.json().get("candidates", [])
                 if not cands:
-                    return ""
-                parts = cands[0].get("content", {}).get("parts", [])
-                return "".join(p.get("text", "") for p in parts).strip()
+                    return "", []
+                cand = cands[0]
+                parts = cand.get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+                links = []
+                for ch in cand.get("groundingMetadata", {}).get("groundingChunks", []):
+                    w = ch.get("web") or {}
+                    if w.get("uri"):
+                        links.append({"title": w.get("title") or w["uri"], "url": w["uri"]})
+                return text, links
             last_err = f"{model} {r.status_code}: {r.text[:300]}"
             if r.status_code in (429, 500, 503, 504):
-                time.sleep(2 * (attempt + 1))
+                time.sleep((8 if r.status_code == 429 else 2) * (attempt + 1))
                 continue
             break  # 400/403/404: try next model
     raise Exception(last_err)
+
+
+def claude(system, messages, max_tokens=1500):
+    return _gemini(system, messages, max_tokens)[0]
 
 
 def standalone_query(question, history):
@@ -144,7 +156,7 @@ def standalone_query(question, history):
             "Rewrite the user's latest message into one standalone web search query "
             "(max 15 words) using the conversation for context. Output only the query.",
             [{"role": "user", "content": f"Conversation:\n{convo}\n\nLatest message: {question}"}],
-            max_tokens=50,
+            max_tokens=300,
         )
         return q.strip().strip('"') or question
     except Exception:
@@ -184,6 +196,135 @@ def answer_question(question, history):
     return text, sources
 
 
+# ---------- detailed research mode ----------
+PROFILE_DEFAULT = """B.Tech Mechanical Engineering, 2026 batch, CGPA 8.28/10 (Sri Venkateswara College of Engineering, Tirupati, JNTUA, India)
+Marksheet states Medium of Instruction: English
+IELTS 5.5 overall
+Skills: CATIA V5, SolidWorks, AutoCAD
+Final year project: impact strength of Al2O3-ZrO2-TiO2 ceramic composites"""
+
+WANTS_DEFAULT = """Programmes: Machine Design, Mechanical Design, Automation, Mechatronics or Materials related masters
+Intake: February, March or April 2027 only
+IELTS 5.5 must be accepted
+Low tuition, and part-time work allowed for international students
+Exclude Germany"""
+
+RESEARCH_SYSTEM = """You are an admissions research assistant for an Indian student.
+Today's date is {today}.
+Use Google Search and read the OFFICIAL university or government study-portal pages.
+Ignore agents, consultants, ranking sites and forums.
+Never guess. If an item is not on an official page, write: Not found, check the official page.
+Only include programmes that really fit the student's wishes (intake month, IELTS, field).
+If nothing fits in the country, say so clearly and give the closest option with the reason it fails.
+Write in English, markdown, no long introduction."""
+
+
+def research_country(country, profile, wants):
+    prompt = f"""Country: {country}
+
+Student profile:
+{profile}
+
+What the student wants:
+{wants}
+
+Find up to 3 best matching Master's programmes in {country}. For EACH programme use exactly this format:
+
+### University name - Programme name
+- Intake and start date:
+- Application deadline:
+- Tuition fee per year (with currency):
+- Other costs (application fee, insurance, etc.):
+- IELTS requirement (is 5.5 accepted? yes or no):
+- Minimum CGPA / percentage:
+- Required documents (full list):
+- Profile match: YES / NO / BORDERLINE, with one-line reason
+- Part-time work rules for international students:
+- Official link:
+"""
+    system = RESEARCH_SYSTEM.format(today=datetime.now().strftime("%d %B %Y"))
+    msgs = [{"role": "user", "content": prompt}]
+    try:
+        return _gemini(system, msgs, max_tokens=6000,
+                       tools=[{"google_search": {}}, {"url_context": {}}], timeout=150)
+    except Exception:
+        return _gemini(system, msgs, max_tokens=6000,
+                       tools=[{"google_search": {}}], timeout=150)
+
+
+FALLBACK_COUNTRIES = ["Poland", "Lithuania", "Latvia", "Czech Republic", "Hungary",
+                      "Malaysia", "Japan", "Turkey", "Cyprus", "Taiwan", "South Korea", "Estonia"]
+
+
+def discover_countries(profile, wants, n):
+    system = RESEARCH_SYSTEM.format(today=datetime.now().strftime("%d %B %Y"))
+    prompt = f"""Student profile:
+{profile}
+
+What the student wants:
+{wants}
+
+Using Google Search, list the {n} countries where English-taught Master's programmes in this field
+most likely have an intake in the months the student wants, accept the student's IELTS score,
+and have low tuition. Put the best chances first.
+Output ONLY the country names separated by commas. No other text."""
+    try:
+        text, _ = _gemini(system, [{"role": "user", "content": prompt}], max_tokens=800,
+                          tools=[{"google_search": {}}], timeout=90)
+    except Exception:
+        return FALLBACK_COUNTRIES[:n]
+    names = []
+    for part in re.split(r"[,\n;]", text):
+        p = re.sub(r"^[\d\.\-\*\s]+", "", part).strip(" .*")
+        if 2 < len(p) < 40 and p.lower() != "germany" and p not in names:
+            names.append(p)
+    return names[:n] or FALLBACK_COUNTRIES[:n]
+
+
+def research_ui():
+    st.subheader("🔎 Detailed research")
+    st.caption("Searches official university pages country by country and gives fees, "
+               "deadlines and documents. Keep the screen on while it runs.")
+    profile = st.text_area("Your profile", PROFILE_DEFAULT, height=170)
+    wants = st.text_area("What you want", WANTS_DEFAULT, height=170)
+    n = st.slider("How many countries to scan", 3, 12, 6)
+    countries = st.text_input("Specific countries (optional, leave empty to search all countries)", "")
+    if st.button("🚀 Start research", type="primary"):
+        st.session_state["research"] = {}
+        names = [c.strip() for c in countries.split(",") if c.strip()]
+        if not names:
+            with st.spinner("Finding the best countries for your profile..."):
+                names = discover_countries(profile, wants, n)
+            st.info("Countries chosen: " + ", ".join(names))
+        bar = st.progress(0.0)
+        status = st.empty()
+        for i, c in enumerate(names):
+            status.info(f"Researching {c} ({i + 1}/{len(names)})...")
+            try:
+                text, links = research_country(c, profile, wants)
+            except Exception as e:
+                text, links = f"Could not research this country: {e}", []
+            st.session_state["research"][c] = (text, links)
+            bar.progress((i + 1) / len(names))
+        status.success("Done. Open each country below.")
+    res = st.session_state.get("research", {})
+    for c, (text, links) in res.items():
+        with st.expander(f"🌍 {c}", expanded=False):
+            st.markdown(text or "No result.")
+            if links:
+                st.markdown("**Sources**")
+                seen = set()
+                for s in links:
+                    if s["url"] in seen:
+                        continue
+                    seen.add(s["url"])
+                    st.markdown(f"- [{s['title']}]({s['url']})")
+    if res:
+        full = "\n\n---\n\n".join(f"# {c}\n\n{t}" for c, (t, _) in res.items())
+        st.download_button("⬇️ Download all (.md)", full, file_name="masters_research.md")
+    st.caption("Always confirm deadlines, fees and documents on the official university website.")
+
+
 # ---------- state ----------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -194,6 +335,12 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.turn += 1
         st.rerun()
+
+mode = st.radio("Mode", ["💬 Quick voice answers", "🔎 Detailed research"],
+                horizontal=True, label_visibility="collapsed")
+if mode.startswith("🔎"):
+    research_ui()
+    st.stop()
 
 voice_slot = st.empty()
 
