@@ -15,7 +15,8 @@ st.title("🎓 Masters Voice Assistant")
 st.caption("Ask about universities, courses, fees, deadlines, admission and IELTS requirements.")
 
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
+FALLBACK_MODELS = st.secrets.get("GEMINI_FALLBACK_MODELS", "gemini-3.8-flash-lite")
 
 if not API_KEY:
     st.error("Add GEMINI_API_KEY in Manage app → Settings → Secrets.")
@@ -100,26 +101,38 @@ def claude(system, messages, max_tokens=400):
          "parts": [{"text": m["content"]}]}
         for m in messages
     ]
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent",
-        headers={"x-goog-api-key": API_KEY, "content-type": "application/json"},
-        json={
-            "system_instruction": {"parts": [{"text": system}]},
-            "contents": contents,
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "thinkingConfig": {"thinkingBudget": 0},
-            },
-        },
-        timeout=60,
-    )
-    if r.status_code >= 400:
-        raise Exception(f"{r.status_code}: {r.text[:300]}")
-    cands = r.json().get("candidates", [])
-    if not cands:
-        return ""
-    parts = cands[0].get("content", {}).get("parts", [])
-    return "".join(p.get("text", "") for p in parts).strip()
+    body = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": contents,
+        "generationConfig": {"maxOutputTokens": max_tokens},
+    }
+    models = [MODEL] + [m.strip() for m in FALLBACK_MODELS.split(",") if m.strip()]
+    last_err = "unknown error"
+    for model in models:
+        for attempt in range(3):
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": API_KEY, "content-type": "application/json"},
+                    json=body,
+                    timeout=30,
+                )
+            except requests.exceptions.RequestException as e:
+                last_err = f"{model}: {e}"
+                time.sleep(2)
+                continue
+            if r.status_code == 200:
+                cands = r.json().get("candidates", [])
+                if not cands:
+                    return ""
+                parts = cands[0].get("content", {}).get("parts", [])
+                return "".join(p.get("text", "") for p in parts).strip()
+            last_err = f"{model} {r.status_code}: {r.text[:300]}"
+            if r.status_code in (429, 500, 503, 504):
+                time.sleep(2 * (attempt + 1))
+                continue
+            break  # 400/403/404: try next model
+    raise Exception(last_err)
 
 
 def standalone_query(question, history):
