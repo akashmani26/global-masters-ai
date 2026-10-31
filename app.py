@@ -14,11 +14,11 @@ st.set_page_config(page_title="Global Masters AI", page_icon="🎓", layout="cen
 st.title("🎓 Masters Voice Assistant")
 st.caption("Ask about universities, courses, fees, deadlines, admission and IELTS requirements.")
 
-API_KEY = st.secrets.get("ANTHROPIC_API_KEY", "")
-MODEL = st.secrets.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
+API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 if not API_KEY:
-    st.error("Add ANTHROPIC_API_KEY in Manage app → Settings → Secrets.")
+    st.error("Add GEMINI_API_KEY in Manage app → Settings → Secrets.")
     st.stop()
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -94,17 +94,31 @@ def read_page(url):
 
 
 def claude(system, messages, max_tokens=400):
+    # Calls Google Gemini (function name kept so the rest of the code is unchanged)
+    contents = [
+        {"role": "model" if m["role"] == "assistant" else "user",
+         "parts": [{"text": m["content"]}]}
+        for m in messages
+    ]
     r = requests.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={"x-api-key": API_KEY, "anthropic-version": "2023-06-01",
-                 "content-type": "application/json"},
-        json={"model": MODEL, "max_tokens": max_tokens,
-              "system": system, "messages": messages},
+        f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent",
+        headers={"x-goog-api-key": API_KEY, "content-type": "application/json"},
+        json={
+            "system_instruction": {"parts": [{"text": system}]},
+            "contents": contents,
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "thinkingConfig": {"thinkingBudget": 0},
+            },
+        },
         timeout=60,
     )
     r.raise_for_status()
-    blocks = r.json().get("content", [])
-    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+    cands = r.json().get("candidates", [])
+    if not cands:
+        return ""
+    parts = cands[0].get("content", {}).get("parts", [])
+    return "".join(p.get("text", "") for p in parts).strip()
 
 
 def standalone_query(question, history):
@@ -313,3 +327,4 @@ with voice_slot:
     components.html(html, height=170)
 
 st.caption("Answers come from pages found just now. Always confirm deadlines and fees on the official university website.")
+    
