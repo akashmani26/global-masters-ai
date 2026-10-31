@@ -1,6 +1,7 @@
 import json
 import re
 import time
+import threading
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -136,8 +137,13 @@ def _gemini(system, messages, max_tokens=1500, tools=None, timeout=30):
                         links.append({"title": w.get("title") or w["uri"], "url": w["uri"]})
                 return text, links
             last_err = f"{model} {r.status_code}: {r.text[:300]}"
-            if r.status_code in (429, 500, 503, 504):
-                time.sleep((8 if r.status_code == 429 else 2) * (attempt + 1))
+            if r.status_code == 429:
+                if attempt == 0:
+                    time.sleep(15)
+                    continue
+                break  # quota is used up, do not keep hitting it
+            if r.status_code in (500, 503, 504):
+                time.sleep(2 * (attempt + 1))
                 continue
             break  # 400/403/404: try next model
     raise Exception(last_err)
@@ -281,33 +287,84 @@ Output ONLY the country names separated by commas. No other text."""
     return names[:n] or FALLBACK_COUNTRIES[:n]
 
 
-def research_ui():
-    st.subheader("🔎 Detailed research")
-    st.caption("Searches official university pages country by country and gives fees, "
-               "deadlines and documents. Keep the screen on while it runs.")
-    profile = st.text_area("Your profile", PROFILE_DEFAULT, height=170)
-    wants = st.text_area("What you want", WANTS_DEFAULT, height=170)
-    n = st.slider("How many countries to scan", 3, 12, 6)
-    countries = st.text_input("Specific countries (optional, leave empty to search all countries)", "")
-    if st.button("🚀 Start research", type="primary"):
-        st.session_state["research"] = {}
-        names = [c.strip() for c in countries.split(",") if c.strip()]
+SUMMARY_SYSTEM = """You write a clear final shortlist for an Indian student from research notes.
+Use ONLY facts present in the notes. Never invent or guess. If a value is missing write: check official page.
+Keep only programmes marked YES or BORDERLINE for the student's profile.
+Output markdown: first a table with columns
+University | Country | Programme | Intake | Deadline | Fee per year | IELTS 5.5 accepted | Match
+then a short line on which 3 to 5 to apply to first and why (deadline urgency, fee, IELTS).
+No long introduction."""
+
+
+@st.cache_resource
+def job_store():
+    return {"lock": threading.Lock(), "status": "idle", "total": 0, "done": 0,
+            "current": "", "countries": [], "results": {}, "summary": "", "error": ""}
+
+
+def run_job(store, names, profile, wants, n):
+    try:
         if not names:
-            with st.spinner("Finding the best countries for your profile..."):
-                names = discover_countries(profile, wants, n)
-            st.info("Countries chosen: " + ", ".join(names))
-        bar = st.progress(0.0)
-        status = st.empty()
+            with store["lock"]:
+                store["current"] = "choosing countries"
+            names = discover_countries(profile, wants, n)
+        with store["lock"]:
+            store["countries"] = names
+            store["total"] = len(names)
+        quota_fails = 0
         for i, c in enumerate(names):
-            status.info(f"Researching {c} ({i + 1}/{len(names)})...")
+            with store["lock"]:
+                store["current"] = c
             try:
                 text, links = research_country(c, profile, wants)
+                quota_fails = 0
             except Exception as e:
                 text, links = f"Could not research this country: {e}", []
-            st.session_state["research"][c] = (text, links)
-            bar.progress((i + 1) / len(names))
-        status.success("Done. Open each country below.")
-    res = st.session_state.get("research", {})
+                if "429" in str(e):
+                    quota_fails += 1
+            with store["lock"]:
+                store["results"][c] = (text, links)
+                store["done"] = i + 1
+            if quota_fails >= 2:
+                store["error"] = ("Google free quota is used up. Wait until it resets "
+                                  "(around 1:30 PM IST) or scan fewer countries.")
+                break
+            time.sleep(5)
+        good = {c: t for c, (t, _) in store["results"].items()
+                if not t.startswith("Could not research")}
+        if good:
+            with store["lock"]:
+                store["current"] = "writing final shortlist"
+            notes = "\n\n".join(f"## {c}\n{t}" for c, t in good.items())[:60000]
+            msg = (f"Student profile:\n{profile}\n\nWishes:\n{wants}\n\nResearch notes:\n{notes}")
+            try:
+                store["summary"] = _gemini(SUMMARY_SYSTEM, [{"role": "user", "content": msg}],
+                                           max_tokens=4000, timeout=120)[0]
+            except Exception as e:
+                store["summary"] = f"Could not write the shortlist: {e}"
+    except Exception as e:
+        store["error"] = str(e)
+    finally:
+        store["status"] = "finished"
+        store["current"] = ""
+
+
+def render_results():
+    store = job_store()
+    if store["status"] == "running":
+        total = max(store["total"], 1)
+        st.progress(min(store["done"] / total, 1.0))
+        st.info(f"Working in the background: {store['current'] or 'starting'} "
+                f"({store['done']}/{store['total'] or '?'} countries done). "
+                "You can lock the phone or leave this page and come back later.")
+    if store["error"]:
+        st.error(store["error"])
+    if store["status"] == "finished" and store["countries"]:
+        st.success("Research finished.")
+    if store["summary"]:
+        st.markdown("## ✅ Final shortlist")
+        st.markdown(store["summary"])
+    res = dict(store["results"])
     for c, (text, links) in res.items():
         with st.expander(f"🌍 {c}", expanded=False):
             st.markdown(text or "No result.")
@@ -320,9 +377,35 @@ def research_ui():
                     seen.add(s["url"])
                     st.markdown(f"- [{s['title']}]({s['url']})")
     if res:
-        full = "\n\n---\n\n".join(f"# {c}\n\n{t}" for c, (t, _) in res.items())
+        full = (store["summary"] + "\n\n---\n\n" if store["summary"] else "") + \
+            "\n\n---\n\n".join(f"# {c}\n\n{t}" for c, (t, _) in res.items())
         st.download_button("⬇️ Download all (.md)", full, file_name="masters_research.md")
     st.caption("Always confirm deadlines, fees and documents on the official university website.")
+
+
+def research_ui():
+    store = job_store()
+    st.subheader("🔎 Detailed research")
+    st.caption("Runs in the background on the server and gives fees, deadlines and documents. "
+               "After you press Start you can lock the phone and come back later.")
+    profile = st.text_area("Your profile", PROFILE_DEFAULT, height=170)
+    wants = st.text_area("What you want", WANTS_DEFAULT, height=170)
+    n = st.slider("How many countries to scan", 3, 12, 5)
+    countries = st.text_input("Specific countries (optional, leave empty to search all countries)", "")
+    running = store["status"] == "running"
+    if st.button("🚀 Start research", type="primary", disabled=running):
+        names = [c.strip() for c in countries.split(",") if c.strip()]
+        with store["lock"]:
+            store.update({"status": "running", "total": len(names), "done": 0,
+                          "current": "starting", "countries": [], "results": {},
+                          "summary": "", "error": ""})
+        threading.Thread(target=run_job, args=(store, names, profile, wants, n),
+                         daemon=True).start()
+        st.rerun()
+    frag = render_results
+    if hasattr(st, "fragment"):
+        frag = st.fragment(run_every=5 if running else None)(render_results)
+    frag()
 
 
 # ---------- state ----------
@@ -395,96 +478,4 @@ const SR = P.SpeechRecognition || P.webkitSpeechRecognition;
 const live = document.getElementById("live");
 
 function sendToChat(text) {
-  const ta = P.document.querySelector('textarea[data-testid="stChatInputTextArea"]')
-          || P.document.querySelector('[data-testid="stChatInput"] textarea');
-  if (!ta) { live.textContent = "Chat box not found. Please type your question."; return false; }
-  const setter = Object.getOwnPropertyDescriptor(P.HTMLTextAreaElement.prototype, "value").set;
-  setter.call(ta, text);
-  ta.dispatchEvent(new P.Event("input", {bubbles: true}));
-  setTimeout(() => {
-    const b = P.document.querySelector('[data-testid="stChatInputSubmitButton"]')
-           || P.document.querySelector('[data-testid="stChatInput"] button');
-    if (b) b.click();
-  }, 300);
-  return true;
-}
-
-function listen() {
-  if (!SR) { live.textContent = "Voice is not supported here. Use Chrome."; return; }
-  if (P.speechSynthesis.speaking) return;
-  try { if (P.__rec) P.__rec.abort(); } catch (e) {}
-  const rec = new SR();
-  P.__rec = rec;
-  rec.lang = "en-IN";
-  rec.interimResults = true;
-  rec.continuous = false;
-  let finalText = "";
-  rec.onstart = () => { live.textContent = "🎙 Listening..."; };
-  rec.onresult = (e) => {
-    let interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += t; else interim += t;
-    }
-    live.textContent = "🗣 " + (finalText + interim);
-  };
-  rec.onerror = (e) => {
-    if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-      P.__convo = false;
-      live.textContent = "Microphone blocked. Allow it in Chrome site settings.";
-    } else if (e.error !== "no-speech" && e.error !== "aborted") {
-      live.textContent = "Voice error: " + e.error;
-    }
-  };
-  rec.onend = () => {
-    if (P.__rec !== rec) return;
-    const t = finalText.trim();
-    if (t) {
-      live.textContent = "⏳ Looking it up: " + t;
-      sendToChat(t);
-    } else if (P.__convo) {
-      setTimeout(listen, 400);
-    }
-  };
-  rec.start();
-}
-
-function speak(text) {
-  P.speechSynthesis.cancel();
-  const u = new P.SpeechSynthesisUtterance(text);
-  u.lang = "en-IN";
-  u.rate = 1.0;
-  u.onstart = () => { live.textContent = "🔊 " + text; };
-  u.onend = () => { if (P.__convo) setTimeout(listen, 300); };
-  P.speechSynthesis.speak(u);
-}
-
-document.getElementById("start").onclick = () => {
-  P.__convo = true;
-  P.speechSynthesis.cancel();
-  listen();
-};
-document.getElementById("end").onclick = () => {
-  P.__convo = false;
-  try { if (P.__rec) P.__rec.abort(); } catch (e) {}
-  P.speechSynthesis.cancel();
-  live.textContent = "Conversation ended. Tap Start to talk again.";
-};
-
-if (SPEAK && P.__spokenId !== SID) {
-  P.__spokenId = SID;
-  speak(SPEAK);
-} else if (P.__convo && !P.speechSynthesis.speaking) {
-  listen();
-}
-</script>
-"""
-
-sp = st.session_state.get("speak", {"id": 0, "text": ""})
-html = (VOICE_HTML
-        .replace("__SPEAK__", json.dumps(sp["text"]).replace("</", "<\\/"))
-        .replace("__SID__", str(sp["id"])))
-with voice_slot:
-    components.html(html, height=170)
-
-st.caption("Answers come from pages found just now. Always confirm deadlines and fees on the official university website.")
+  const ta = P.document.querySelector('textarea[data-testid="stChatIn
