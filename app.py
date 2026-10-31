@@ -478,4 +478,4 @@ const SR = P.SpeechRecognition || P.webkitSpeechRecognition;
 const live = document.getElementById("live");
 
 function sendToChat(text) {
-  const ta = P.document.querySelector('textarea[data-testid="stChatIn
+  const ta = P.document.querySelector('textarea[data-testid="stChatIn 
