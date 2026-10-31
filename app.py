@@ -478,4 +478,95 @@ const SR = P.SpeechRecognition || P.webkitSpeechRecognition;
 const live = document.getElementById("live");
 
 function sendToChat(text) {
-  const ta = P.document.querySelector('textarea[data-testid="stChatIn
+  const all = P.document.querySelectorAll("textarea");
+  const ta = all[all.length - 1];
+  if (!ta) { live.textContent = "Chat box not found."; return; }
+  const setter = Object.getOwnPropertyDescriptor(P.HTMLTextAreaElement.prototype, "value").set;
+  setter.call(ta, text);
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+  setTimeout(() => {
+    ta.dispatchEvent(new KeyboardEvent("keydown", {key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true}));
+  }, 200);
+  setTimeout(() => {
+    let el = ta.parentElement;
+    for (let i = 0; i < 5 && el; i++) {
+      const b = el.querySelector("button");
+      if (b) { b.click(); break; }
+      el = el.parentElement;
+    }
+  }, 600);
+}
+
+let rec = null, active = false, speaking = false;
+const store = P.sessionStorage;
+
+function listen() {
+  if (!SR) { live.textContent = "Speech recognition is not supported in this browser. Use Chrome."; return; }
+  if (rec || speaking) return;
+  rec = new SR();
+  rec.lang = "en-IN";
+  rec.interimResults = true;
+  rec.continuous = false;
+  rec.onresult = (e) => {
+    let t = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) t += e.results[i][0].transcript;
+    live.textContent = "🎤 " + t;
+    if (e.results[e.results.length - 1].isFinal && t.trim()) {
+      active = true;
+      store.setItem("gm_active", "1");
+      sendToChat(t.trim());
+    }
+  };
+  rec.onerror = (e) => { live.textContent = "Mic error: " + e.error; };
+  rec.onend = () => {
+    rec = null;
+    if (active && !speaking) setTimeout(listen, 400);
+  };
+  try { rec.start(); live.textContent = "🎤 Listening..."; } catch (err) { rec = null; }
+}
+
+function stopAll() {
+  active = false;
+  store.removeItem("gm_active");
+  if (rec) { try { rec.abort(); } catch (e) {} rec = null; }
+  P.speechSynthesis.cancel();
+  live.textContent = "Stopped. Tap Start conversation to talk again.";
+}
+
+function speak(text) {
+  P.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "en-IN";
+  speaking = true;
+  live.textContent = "🔊 " + text;
+  u.onend = u.onerror = () => {
+    speaking = false;
+    if (active) setTimeout(listen, 400);
+  };
+  P.speechSynthesis.speak(u);
+}
+
+document.getElementById("start").onclick = () => {
+  active = true;
+  store.setItem("gm_active", "1");
+  listen();
+};
+document.getElementById("end").onclick = stopAll;
+
+if (store.getItem("gm_active") === "1") active = true;
+if (SPEAK && store.getItem("gm_last") !== SID) {
+  store.setItem("gm_last", SID);
+  speak(SPEAK.text);
+} else if (active) {
+  listen();
+}
+</script>
+"""
+
+# ---------- render widget ----------
+speak_payload = st.session_state.pop("speak", None)
+html = (VOICE_HTML
+        .replace("__SPEAK__", json.dumps(speak_payload))
+        .replace("__SID__", str(st.session_state.turn)))
+with voice_slot:
+    components.html(html, height=190)
