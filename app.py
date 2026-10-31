@@ -113,7 +113,8 @@ def claude(system, messages, max_tokens=400):
         },
         timeout=60,
     )
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise Exception(f"{r.status_code}: {r.text[:300]}")
     cands = r.json().get("candidates", [])
     if not cands:
         return ""
@@ -327,4 +328,3 @@ with voice_slot:
     components.html(html, height=170)
 
 st.caption("Answers come from pages found just now. Always confirm deadlines and fees on the official university website.")
-    
