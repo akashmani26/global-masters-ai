@@ -346,8 +346,8 @@ def run_job(store, names, profile, wants, n):
                 store["results"][c] = (text, links)
                 store["done"] = i + 1
             if quota_fails >= 2:
-                store["error"] = ("All Gemini models have hit their free quota. "
-                                  "Wait for the daily reset (about 12:30 PM IST), "
+                                store["error"] = ("All Gemini models have hit their free quota. "
+                                  "Wait for the daily reset (about 1:30 PM IST), "
                                   "scan fewer countries, or enable billing.")
                 break
             time.sleep(5)
