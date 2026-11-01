@@ -16,8 +16,10 @@ st.title("🎓 Masters Voice Assistant")
 st.caption("Ask about universities, courses, fees, deadlines, admission and IELTS requirements.")
 
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash")
-FALLBACK_MODELS = st.secrets.get("GEMINI_FALLBACK_MODELS", "gemini-3.5-flash-lite,gemini-3.6-flash")
+MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_MODELS = st.secrets.get(
+    "GEMINI_FALLBACK_MODELS",
+    "gemini-3.8-flash,gemini-2.5-flash,gemini-2.0-flash,gemini-2.0-flash-lite")
 
 if not API_KEY:
     st.error("Add GEMINI_API_KEY in Manage app → Settings → Secrets.")
@@ -95,6 +97,13 @@ def read_page(url):
         return ""
 
 
+# Remembers which models are out of quota, so we skip them and go
+# straight to the next model instead of waiting.
+@st.cache_resource
+def cooldowns():
+    return {}
+
+
 def _gemini(system, messages, max_tokens=1500, tools=None, timeout=30):
     contents = [
         {"role": "model" if m["role"] == "assistant" else "user",
@@ -108,10 +117,20 @@ def _gemini(system, messages, max_tokens=1500, tools=None, timeout=30):
     }
     if tools:
         body["tools"] = tools
-    models = [MODEL] + [m.strip() for m in FALLBACK_MODELS.split(",") if m.strip()]
+
+    models = []
+    for m in [MODEL] + FALLBACK_MODELS.split(","):
+        m = m.strip()
+        if m and m not in models:
+            models.append(m)
+
+    cd = cooldowns()
+    now = time.time()
+    active = [m for m in models if cd.get(m, 0) < now] or models
     last_err = "unknown error"
-    for model in models:
-        for attempt in range(3):
+
+    for model in active:
+        for attempt in range(2):
             try:
                 r = requests.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -138,14 +157,14 @@ def _gemini(system, messages, max_tokens=1500, tools=None, timeout=30):
                 return text, links
             last_err = f"{model} {r.status_code}: {r.text[:300]}"
             if r.status_code == 429:
-                if attempt == 0:
-                    time.sleep(15)
-                    continue
-                break  # quota is used up, do not keep hitting it
+                # daily quota: skip this model for 1 hour, per-minute quota: 70 seconds
+                cd[model] = time.time() + (3600 if "PerDay" in r.text else 70)
+                break  # go to the next model immediately
             if r.status_code in (500, 503, 504):
                 time.sleep(2 * (attempt + 1))
                 continue
-            break  # 400/403/404: try next model
+            cd[model] = time.time() + 600  # 400/403/404: wrong model name, skip for a while
+            break
     raise Exception(last_err)
 
 
@@ -326,8 +345,9 @@ def run_job(store, names, profile, wants, n):
                 store["results"][c] = (text, links)
                 store["done"] = i + 1
             if quota_fails >= 2:
-                store["error"] = ("Google free quota is used up. Wait until it resets "
-                                  "(around 1:30 PM IST) or scan fewer countries.")
+                store["error"] = ("All Gemini models have hit their free quota. "
+                                  "Wait for the daily reset (about 12:30 PM IST), "
+                                  "scan fewer countries, or enable billing.")
                 break
             time.sleep(5)
         good = {c: t for c, (t, _) in store["results"].items()
