@@ -19,7 +19,7 @@ API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 FALLBACK_MODELS = st.secrets.get(
     "GEMINI_FALLBACK_MODELS",
-    "gemini-3.8-flash,gemini-2.5-flash,gemini-2.0-flash,gemini-2.0-flash-lite")
+    "gemini-3.8-flash,gemini-3.6-flash,gemini-2.5-flash")
 
 if not API_KEY:
     st.error("Add GEMINI_API_KEY in Manage app → Settings → Secrets.")
@@ -155,7 +155,7 @@ def _gemini(system, messages, max_tokens=1500, tools=None, timeout=30):
                     if w.get("uri"):
                         links.append({"title": w.get("title") or w["uri"], "url": w["uri"]})
                 return text, links
-            last_err = f"{model} {r.status_code}: {r.text[:300]}"
+            last_err = (last_err + " | " if last_err != "unknown error" else "") + f"{model} {r.status_code}: {r.text[:150]}"
             if r.status_code == 429:
                 # daily quota: skip this model for 1 hour, per-minute quota: 70 seconds
                 cd[model] = time.time() + (3600 if "PerDay" in r.text else 70)
