@@ -17,7 +17,6 @@ st.caption("Ask about universities, courses, fees, deadlines, admission and IELT
 
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
-MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 FALLBACK_MODELS = st.secrets.get(
     "GEMINI_FALLBACK_MODELS",
     "gemini-3.8-flash,gemini-3.6-flash")
@@ -346,7 +345,7 @@ def run_job(store, names, profile, wants, n):
                 store["results"][c] = (text, links)
                 store["done"] = i + 1
             if quota_fails >= 2:
-                                store["error"] = ("All Gemini models have hit their free quota. "
+                store["error"] = ("All Gemini models have hit their free quota. "
                                   "Wait for the daily reset (about 1:30 PM IST), "
                                   "scan fewer countries, or enable billing.")
                 break
