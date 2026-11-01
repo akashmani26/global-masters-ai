@@ -18,8 +18,9 @@ st.caption("Ask about universities, courses, fees, deadlines, admission and IELT
 API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 MODEL = st.secrets.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 FALLBACK_MODELS = st.secrets.get(
+    "FALLBACK_MODELS = st.secrets.get(
     "GEMINI_FALLBACK_MODELS",
-    "gemini-3.8-flash,gemini-3.6-flash,gemini-2.5-flash")
+    "gemini-3.8-flash,gemini-3.6-flash")
 
 if not API_KEY:
     st.error("Add GEMINI_API_KEY in Manage app → Settings → Secrets.")
